@@ -1,0 +1,34 @@
+syntax = "proto2";
+
+package player;
+
+message NeuronGraph {
+  message Neuron {
+    required int32 id = 1;
+    
+    enum Type {
+      EXCIATORY = 0;
+      INHIBITORY = 1;
+      INPUT = 2;
+      OUTPUT = 3;
+    }
+    
+    required Type type = 2;
+    optional int32 input_output_id = 3;
+  }
+  repeated Neuron neurons = 1;
+  
+  message Synapse {
+    required int32 id = 1;
+    required int32 presynaptic = 2;
+    required int32 postsynaptic = 3;
+    required float weight = 4;
+    optional bool enabled = 5;
+  }
+  repeated Synapse synapses = 2;
+  
+  optional int32 generation = 3;
+  optional int32 species = 4;
+  optional int32 id = 5;
+  optional string name = 6;
+}
