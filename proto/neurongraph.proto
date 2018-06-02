@@ -7,7 +7,7 @@ message NeuronGraph {
     required int32 id = 1;
     
     enum Type {
-      EXCIATORY = 0;
+      EXCITATORY = 0;
       INHIBITORY = 1;
       INPUT = 2;
       OUTPUT = 3;
@@ -31,4 +31,5 @@ message NeuronGraph {
   optional int32 species = 4;
   optional int32 id = 5;
   optional string name = 6;
+  optional int32 score = 7;
 }

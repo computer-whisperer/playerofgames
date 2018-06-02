@@ -4,15 +4,19 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdio.h>
+#include <sys/time.h>
 
-int main(void) {
+int main() {
    Display *d;
    Window w;
    XEvent e;
    int s;
 
-  /* initialize random seed: */
-  srand (time(NULL));
+  int pid = getpid();
+  timeval t;
+  gettimeofday(&t, NULL);
+  srand(t.tv_usec * t.tv_sec * pid);
 
   char order[10];
   int order_pos = 0;
@@ -33,7 +37,7 @@ int main(void) {
         break;
     }
   }
- 
+  printf(getenv("DISPLAY"));
    d = XOpenDisplay(NULL);
    if (d == NULL) {
       fprintf(stderr, "Cannot open display\n");
@@ -150,10 +154,14 @@ int main(void) {
           order_pos++;
           if (order[order_pos] == '\0')
             order_pos = 0;
+          printf("Good\n");
+          fflush(stdout);
         }
         else {
           order_pos = 0;
           center_value = false;
+          printf("Bad\n");
+          fflush(stdout);
         }
       }
     }

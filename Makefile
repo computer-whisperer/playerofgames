@@ -23,7 +23,7 @@
 
 # Name of the binary file to be created.
 # NOTE: There must be a corresponding .cpp file named main_$(proj_target).cpp!
-proj_targets    := player spawner
+proj_targets    := player spawner tester metatester games/simon neurongraph_printer manager
 
 # Directory where all include files reside. The Makefile will automatically
 # detect and include all .h files within that directory.
@@ -90,14 +90,29 @@ default: $(proj_targets)
 #$(proj_targets): $(main_src_file) $(inc_files) $(obj_files)
 #	$(NVCC) $(CARLSIM3_FLG) -g $(obj_files) $< -o $@ $(CARLSIM3_LIB) -lx11
 	
-player: src/main_player.cpp $(inc_files)
-	$(NVCC) $(CARLSIM3_FLG) -g $< -o $@ $(CARLSIM3_LIB) -lX11
+player: src/main_player.cpp $(inc_files) neurongraph.pb.o
+	$(NVCC) -I./ $(CARLSIM3_FLG) -g $< neurongraph.pb.o -o $@ $(CARLSIM3_LIB) -lX11 -lprotobuf
+	
+manager: src/main_manager.cpp $(inc_files) neurongraph.pb.o
+	$(NVCC) -I./ -g $< neurongraph.pb.o -o $@ -lprotobuf
+
+tester: src/main_tester.cpp $(inc_files) neurongraph.pb.o
+	$(NVCC) -I./ -g $< neurongraph.pb.o -o $@ -lprotobuf
+
+metatester: src/main_metatester.cpp $(inc_files) neurongraph.pb.o
+	$(NVCC) -I./ -g $< neurongraph.pb.o -o $@ -lprotobuf
 
 spawner: src/main_spawner.cpp $(inc_files) neurongraph.pb.o
-	$(CXX) -g -I./ $< neurongraph.pb.o  -o $@ -lprotobuf
+	$(CXX) -g -I./ $< neurongraph.pb.o -o $@ -lprotobuf
+
+neurongraph_printer: src/main_neurongraph_printer.cpp $(inc_files) neurongraph.pb.o
+	$(CXX) -g -I./ $< neurongraph.pb.o -o $@ -lprotobuf
 
 neurongraph.pb.o: proto/neurongraph.pb.cc
 	$(CXX) -I./ -c $(CXXINCFL) -g $< -o $@ -lprotobuf
+	
+games/simon: games/src/simon.cpp
+	$(CXX) $< -o $@ -lX11
 
 $(proj_src_dir)/%-cpp.o: $(proj_src_dir)/%.cpp $(inc_files)
 	$(CXX) $(CARLSIM3_FLG) -c $(CXXINCFL) -g $(CXXFL) $< -o $@ $(CARLSIM3_LIB) -lx11

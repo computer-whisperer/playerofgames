@@ -1,19 +1,23 @@
 
-// include CARLsim user interface
+#define GAME_X 200
+#define GAME_Y 200
+#define CURSOR_DOWNSCALING 10
+
 #include <carlsim.h>
+#include "proto/neurongraph.pb.h"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <string.h>
+#include <iostream>
+#include <fstream>
+#include <string>
 #include <math.h>
 #include <vector>
 #include <map>
-#include "proto/neurongraph.pb.h"
 
-#define GAME_X 200
-#define GAME_Y 200
-#define CURSOR_DOWNSCALING 10
+using namespace player;
+using namespace std;
 
 int get_shift (unsigned long mask) {
   int shift = 0;
@@ -97,28 +101,162 @@ void move_to (Display *display, int x, int y)
   usleep (1);
 }
 
+// custom ConnectionGenerator
+class MyConnection : public ConnectionGenerator {
+  public:
+  vector<int> *input_neuron_ids, *output_neuron_ids, *excitatory_neuron_ids, *inhibitory_neuron_ids;
+  int gin, ghidden_ex, ghidden_in, gout;
+  std::map<int, std::map<int, float_t>> *connection_map;
+  MyConnection(){}
+  
+  void loadvals(int gin, int ghidden_ex, int ghidden_in, int gout, vector<int> *input_neuron_ids, vector<int> *excitatory_neuron_ids, vector<int> *inhibitory_neuron_ids,vector<int> *output_neuron_ids, std::map<int, std::map<int, float_t>> *connection_map) {
+    this->input_neuron_ids = input_neuron_ids;
+    this->output_neuron_ids = output_neuron_ids;
+    this->excitatory_neuron_ids = excitatory_neuron_ids;
+    this->inhibitory_neuron_ids = inhibitory_neuron_ids;
+    this->gin = gin;
+    this->ghidden_ex = ghidden_ex;
+    this->ghidden_in = ghidden_in;
+    this->connection_map = connection_map;
+    this->gout = gout;
+  }
+  ~MyConnection() {}
+  
+  int get_training_id(int group, int id) {
+    if (group == gin)
+      return (*input_neuron_ids)[id];
+    else if (group == ghidden_in)
+      return (*inhibitory_neuron_ids)[id];
+    else if (group == ghidden_ex)
+      return (*excitatory_neuron_ids)[id];
+    else if (group == gout)
+      return (*output_neuron_ids)[id];
+    return -1;
+  }
+  
+  // the pure virtual function inherited from base class
+  // note that weight, maxWt, delay, and connected are passed by reference
+  void connect(CARLsim* sim, int srcGrp, int i, int destGrp, int j, float& weight, float& maxWt, float& delay, bool& connected) {
+    int src_training_id = get_training_id(srcGrp, i);
+    int tgt_training_id = get_training_id(destGrp, j);
+    
+    maxWt = 2.0f;
+    delay = 1.0f;
+    weight = 0.0f;
+    
+    if (connection_map->find(src_training_id) == connection_map->end()){
+      connected = false;
+      return;
+    }
+    if ((*connection_map)[src_training_id].find(tgt_training_id) == (*connection_map)[src_training_id].end()){
+      connected = false;
+      return;
+    }
+    connected = true;
+    weight = (*connection_map)[src_training_id][tgt_training_id];
+  }
+};
+
 
 int main(int argc, char **argv) {
   
+  if (argc < 3) {
+    cerr << "Usage: player DISPLAY INPUT_NEURONGRAPH_FILE [--nographics]" << endl;
+    return -1;
+  }
+  
+  bool graphics = true;
+  for (int i = 0; i < argc; i++)
+    if (strcmp(argv[i], "--nographics") == 0)
+      graphics = false;
+  
+
+  
+	// keep track of execution time
+	Stopwatch watch;
+  
+  // neuron id maps -- maps group neuron ids to training neuron ids
+  std::vector<int> input_neuron_ids;
+  std::vector<int> output_neuron_ids;
+  std::vector<int> excitatory_neuron_ids;
+  std::vector<int> inhibitory_neuron_ids;
+  
+  // io neuron maps -- maps group neuron ids to io neuron ids
+  std::vector<int> io_input_neuron_ids;
+  std::vector<int> io_output_neuron_ids;
+
+  
+  // relates the training neuron ids of the presynaptic neuron to the postsynaptic neuron and contains the weight.
+  std::map<int, std::map<int, float_t>> connection_map;
+  
+  // Read the incoming neuron graph.
+  NeuronGraph neurongraph;
+  fstream input(argv[2], ios::in | ios::binary);
+  if (!neurongraph.ParseFromIstream(&input)) {
+    cerr << "Failed to parse neuron graph." << endl;
+    return -1;
+  }
+  input.close();
+  // Read the node list
+  for (int i = 0; i < neurongraph.neurons_size(); i++){
+    NeuronGraph_Neuron neuron = neurongraph.neurons(i);
+    switch (neuron.type()) {
+      case NeuronGraph_Neuron::EXCITATORY:
+        excitatory_neuron_ids.push_back(neuron.id());
+        break;
+      case NeuronGraph_Neuron::INHIBITORY:
+        inhibitory_neuron_ids.push_back(neuron.id());
+        break;
+      case NeuronGraph_Neuron::INPUT:
+        input_neuron_ids.push_back(neuron.id());
+        io_input_neuron_ids.push_back(neuron.input_output_id());
+        break;
+      case NeuronGraph_Neuron::OUTPUT:
+        output_neuron_ids.push_back(neuron.id());
+        io_output_neuron_ids.push_back(neuron.input_output_id());
+        break;
+    }
+  }
+  // Read the connection list
+  for (int i = 0; i < neurongraph.synapses_size(); i++) {
+    NeuronGraph_Synapse synapse = neurongraph.synapses(i);
+    connection_map[synapse.presynaptic()][synapse.postsynaptic()] = synapse.weight();
+  }
+  printf("Loaded %i excitatory neurons.\n", excitatory_neuron_ids.size());
+  printf("Loaded %i inhibitory neurons.\n", inhibitory_neuron_ids.size());
+  printf("Loaded %i input neurons.\n", input_neuron_ids.size());
+  printf("Loaded %i output neurons.\n", output_neuron_ids.size());
+
   // Xlib init
   Display *infoDisplay;
   Display *gameDisplay;
   Window gameRoot;
   Window infoWindow;
+  int s;
   
-  infoDisplay = XOpenDisplay(NULL);
-  gameDisplay = XOpenDisplay(":1");
-  
-  int s = DefaultScreen(infoDisplay);
-  
-  gameRoot = XDefaultRootWindow(gameDisplay);
-  
-  /* create stats window */
-  infoWindow = XCreateSimpleWindow(infoDisplay, RootWindow(infoDisplay, s), 10, 10, 200, 200, 1,
+  if (graphics) {
+    infoDisplay = XOpenDisplay(":0");
+    if (infoDisplay == NULL){
+      fprintf(stderr, "ERROR: Could not open the info display: %s!\n", getenv("DISPLAY"));
+      exit(1);
+    }
+    
+    s = DefaultScreen(infoDisplay);
+    
+    /* create stats window */
+    infoWindow = XCreateSimpleWindow(infoDisplay, RootWindow(infoDisplay, s), 10, 10, 200, 200, 1,
                            BlackPixel(infoDisplay, s), WhitePixel(infoDisplay, s));
                            
-  /* map (show) the window */
-  XMapWindow(infoDisplay, infoWindow);
+    /* map (show) the window */
+    XMapWindow(infoDisplay, infoWindow);
+  }
+  gameDisplay = XOpenDisplay(argv[1]);
+  if (gameDisplay == NULL) {
+    fprintf(stderr, "ERROR: Could not open the game display!\n");
+    exit(1);
+  }
+
+  gameRoot = XDefaultRootWindow(gameDisplay);
   
   // Figure out the bit offsets of r g and b
   XImage *image = XGetImage(gameDisplay, gameRoot, 0, 0, GAME_X, GAME_Y, AllPlanes, ZPixmap);
@@ -131,52 +269,8 @@ int main(int argc, char **argv) {
   bool last_left_click = false;
   bool last_right_click = false;
   
-  
-	// keep track of execution time
-	Stopwatch watch;
-  
-  // neuron id maps -- maps a neuron id in the group to an official neuron id
-  std::vector<int> input_neuron_ids = new std::vector<int>();
-  std::vector<int> output_neuron_ids = new std::vector<int>();
-  std::vector<int> exciatory_neuron_ids = new std::vector<int>();
-  std::vector<int> inhibitory_neuron_ids = new std::vector<int>();
-  
-  // relates the incoming neuron ids of the presynaptic neuron to the postsynaptic neuron and contains the weight.
-  std::map<int, std::map<int, float_t>> connection_map = new std::map<int, std::map<int, float_t>>();
-  
-  // Read the incoming neuron graph.
-  NeuronGraph neurongraph;
-  fstream input("in.neurongraph", ios::in | ios::binary);
-  if (!neurongraph.ParseFromIstream(&input)) {
-    cerr << "Failed to parse neuron graph book." << endl;
-    return -1;
-  }
-  // Read the node list
-  for (int i = 0; i < neurongrah.neurons_size(); i++){
-    Neuron& neuron = neurongraph.neurons(i);
-    switch (neuron.type()) {
-      case Neuron::EXCIATORY:
-        exciatory_neuron_ids.insert(neuron.id())
-        break;
-      case Neuron::INHIBITORY:
-        inhibitory_neuron_ids.insert(neuron.id())
-        break;
-      case Neuron::INPUT:
-        input_neuron_ids.insert(neuron.id())
-        break;
-      case Neuron::OUTPUT:
-        output_neuron_ids.insert(neuron.id())
-        break;
-    }
-  }
-  // Read the connection list
-  for (int i = 0; i < neurongraph.synapses_size(); i++) {
-    Synapse& synapse = neurongraph.synapses(i);
-    connection_map[synapse.presynaptic()][synapse.postsynaptic()] = synapse.weight();
-  }
-  printf("Loaded %i presynaptic neurons.", connection_map.count());
-*/
-  // ---------------- CONFIG STATE -------------------
+
+  // CONFIG CARLSIM
 
 	// Create a network on the CPU.
 	// In order to run a network on the GPU, change CPU_MODE to GPU_MODE. However, please note that this
@@ -186,7 +280,7 @@ int main(int argc, char **argv) {
 	int randSeed = 42;
 	CARLsim sim("player", CPU_MODE, USER, ithGPU, randSeed);
 
-	// Configure the network.
+/*	// Configure the network.
 	// Organize neurons on a 2D grid: A SpikeGenerator group `gin` and a regular-spiking group `gout`
 	Grid3D gridIn(GAME_X, GAME_Y, 1); // pre is a framebuffer input
   
@@ -212,13 +306,46 @@ int main(int argc, char **argv) {
   sim.connect(ghidden, goutx, "gaussian", RangeWeight(0.05), 1.0f, RangeDelay(1), RadiusRF(5,5,1));
   sim.connect(ghidden, gouty, "gaussian", RangeWeight(0.05), 1.0f, RangeDelay(1), RadiusRF(5,5,1));
   sim.connect(ghidden, goutc, "gaussian", RangeWeight(0.035), 1.0f, RangeDelay(1), RadiusRF(5,5,1));
+ */
+ 
+ 	int gin = sim.createSpikeGeneratorGroup("input", input_neuron_ids.size(), EXCITATORY_NEURON);
+  int ghidden_ex=sim.createGroup("hidden_excitatory", excitatory_neuron_ids.size(), EXCITATORY_NEURON);
+  int ghidden_in=sim.createGroup("hidden_inhibitory", inhibitory_neuron_ids.size(), INHIBITORY_NEURON);
+	int gout=sim.createGroup("output", output_neuron_ids.size(), EXCITATORY_NEURON);
   
-  sim.setSTP(ghidden, true);
+  sim.setNeuronParameters(ghidden_ex, 0.02f, 0.2f, -65.0f, 8.0f);
+  sim.setNeuronParameters(ghidden_in, 0.02f, 0.2f, -65.0f, 8.0f);
+	sim.setNeuronParameters(gout, 0.02f, 0.2f, -65.0f, 8.0f);
+  
+  // create an instance of MyConnection class and pass it to CARLsim::connect
+  MyConnection myConn;
+  myConn.loadvals(gin, ghidden_ex, ghidden_in, gout, \
+    &input_neuron_ids, \
+    &excitatory_neuron_ids, \
+    &inhibitory_neuron_ids, \
+    &output_neuron_ids, \
+    &connection_map);
+  sim.connect(gin, ghidden_ex, &myConn, SYN_PLASTIC);
+  sim.connect(gin, ghidden_in, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_ex, ghidden_ex, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_ex, ghidden_in, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_in, ghidden_ex, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_in, ghidden_in, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_ex, gout, &myConn, SYN_PLASTIC);
+  sim.connect(ghidden_in, gout, &myConn, SYN_PLASTIC);
+  sim.connect(gin, gout, &myConn, SYN_PLASTIC);
+  
+  sim.setSTP(ghidden_in, true);
+  sim.setSTP(ghidden_ex, true);
+
 #define ALPHA_LTP 0.001f
 #define TAU_LTP 20.0f
 #define ALPHA_LTD 0.0015f
 #define TAU_LTD 20.0f
-  sim.setESTDP(ghidden, true, STANDARD, ExpCurve(ALPHA_LTP/100, TAU_LTP, ALPHA_LTD/100, TAU_LTP));
+  sim.setESTDP(ghidden_ex, true, STANDARD, ExpCurve(ALPHA_LTP/100, TAU_LTP, ALPHA_LTD/100, TAU_LTP));
+  sim.setISTDP(ghidden_in, true, STANDARD, ExpCurve(ALPHA_LTP/100, TAU_LTP, ALPHA_LTD/100, TAU_LTP));
+  sim.setESTDP(gout, true, STANDARD, ExpCurve(ALPHA_LTP/100, TAU_LTP, ALPHA_LTD/100, TAU_LTP));
+
 
 	// Make synapses conductance based. Set to false for current based synapses.
 	sim.setConductances(true);
@@ -226,9 +353,7 @@ int main(int argc, char **argv) {
 	// Use the forward Euler integration method with 2 integration steps per 1 ms time step.
 	sim.setIntegrationMethod(FORWARD_EULER, 2);
   
-  sim.setSpikeCounter(goutx, -1);
-  sim.setSpikeCounter(gouty, -1);
-  sim.setSpikeCounter(goutc, -1);
+  sim.setSpikeCounter(gout, -1);
     
 	// ---------------- SETUP STATE -------------------
 	// build the network
@@ -237,25 +362,26 @@ int main(int argc, char **argv) {
 
 	// Set spike monitors on both groups. Also monitor the weights between `gin` and `gout`.
 	//sim.setSpikeMonitor(gin,"DEFAULT");
-	//sim.setSpikeMonitor(goutx,"DEFAULT");
-  //sim.setSpikeMonitor(gouty,"DEFAULT");
+	//sim.setSpikeMonitor(ghidden_ex,"DEFAULT");
+  //sim.setSpikeMonitor(gout,"DEFAULT");
 	//sim.setConnectionMonitor(ghidden,gout,"DEFAULT");
   
 
 	// Setup some baseline input: Every neuron in `gin` will spike according to a Poisson process with
 	// 30 Hz mean firing rate.
-	PoissonRate in(GAME_X*GAME_Y);
+	PoissonRate in(input_neuron_ids.size());
 	in.setRates(0.0f);
 	sim.setSpikeRate(gin,&in);
 
 	// ---------------- RUN STATE -------------------
 	watch.lap("runNetwork");
-	for (int i=0; i<1000; i++) {
+	for (int i=0; i<10000; i++) {
     clock_t startloop = clock();
 		sim.runNetwork(0,100);
     
     // Handle framebuffer input
     XImage *image = XGetImage(gameDisplay, gameRoot, 0, 0, GAME_X, GAME_Y, AllPlanes, ZPixmap);
+    char framebuffer[GAME_X*GAME_Y];
     for (int x = 0; x < GAME_X; x++)
       for (int y = 0; y < GAME_Y; y++) {
         unsigned long pixel = XGetPixel(image, x, y);
@@ -265,74 +391,92 @@ int main(int argc, char **argv) {
         int grey = ((0.3 * red) + (0.59 * green) + (0.11 * blue));
         unsigned long new_pixel = pixel && ~(image->red_mask | image->green_mask | image->blue_mask);
         new_pixel |= grey << red_shift | grey << blue_shift | grey << green_shift;
-        XPutPixel(image, x, y, new_pixel);
-        int rate = grey/30;
-        in.setRate(x+y*GAME_X, rate);
+        if (graphics)
+          XPutPixel(image, x, y, new_pixel);
+        framebuffer[x+y*GAME_X] = grey;
       }
+    
+    for (int i = 0; i < input_neuron_ids.size(); i++) {
+      in.setRate(i, ((int)framebuffer[io_input_neuron_ids[i]])/3);
+      //printf("%i\n", ((int)framebuffer[io_input_neuron_ids[i]])/3);
+    }
+    
     sim.setSpikeRate(gin,&in);
     
-    int mouse_x, mouse_y;
     bool left_click, right_click;
-    
-    // Neural net mouse clicks out
-    int * ccounts = sim.getSpikeCounter(goutc);
-    left_click = ccounts[0] > ccounts[2];
-    right_click = ccounts[1] > ccounts[2];
     
     // Neural net mouse position out
     
-    int * xcounts = sim.getSpikeCounter(goutx);
-    int * ycounts = sim.getSpikeCounter(gouty);
-    
+    int * counts = sim.getSpikeCounter(gout);
     int xcount_total = 0;
-    for (int x = 0; x < GAME_X/CURSOR_DOWNSCALING; x++) {
-      xcount_total += xcounts[x];
-      mouse_x += x*CURSOR_DOWNSCALING*xcounts[x];
+    int ycount_total = 0;
+    int mouse_x = 0;
+    int mouse_y = 0;
+    
+    int right_click_count = 0;
+    int left_click_count = 0;
+    int null_click_count = 0;
+    
+    for (int i = 0; i < output_neuron_ids.size(); i++) {
+      int training_id = io_output_neuron_ids[i];
+      if (training_id < 20) {// X coordinate scale
+        xcount_total += counts[i];
+        mouse_x += training_id*10*counts[i];
+      }
+      else if (training_id < 40) {// Y coordinate scale
+        ycount_total += counts[i];
+        mouse_y += (training_id-20)*10*counts[i];
+      }
+      else if (training_id == 40)
+        left_click_count = counts[i];
+      else if (training_id == 41)
+        right_click_count = counts[i];
+      else if (training_id == 42)
+        null_click_count = counts[i];
     }
+    
     if (xcount_total == 0)
       mouse_x = GAME_X/2;
     else
       mouse_x /= xcount_total;
     
-    int ycount_total = 0;
-    for (int y = 0; y < GAME_Y/CURSOR_DOWNSCALING; y++) {
-      ycount_total += ycounts[y];
-      mouse_y += y*CURSOR_DOWNSCALING*ycounts[y];
-    }
     if (ycount_total == 0)
       mouse_y = GAME_Y/2;
     else
       mouse_y /= ycount_total;
     
-    sim.resetSpikeCounter(goutx);
-    sim.resetSpikeCounter(gouty);
-    sim.resetSpikeCounter(goutc);
+    // Neural net mouse clicks out
+    left_click = left_click_count > null_click_count;
+    right_click = right_click_count > null_click_count;
+    
+    sim.resetSpikeCounter(gout);
     
     // Handle mouse input
-    Window root_return, child_return;
-    int root_x_return, root_y_return, win_x_return, win_y_return;
-    unsigned int mask_return;
-    bool overrideMouse = XQueryPointer(infoDisplay, \
-      infoWindow, \
-      &root_return, \
-      &child_return, \
-      &root_x_return, \
-      &root_y_return, \
-      &win_x_return, \
-      &win_y_return, \
-      &mask_return);
-      
-    if (overrideMouse && 2 < win_x_return && win_x_return < GAME_X-2 && 2 < win_y_return && win_y_return < GAME_Y-2 ) {
-      left_click = false;
-      right_click = false;
-      if (mask_return&0x100)
-        left_click = true;
-      if (mask_return&0x400)
-        right_click = true;
-      mouse_x = win_x_return;
-      mouse_y = win_y_return;
+    if (graphics) {
+      Window root_return, child_return;
+      int root_x_return, root_y_return, win_x_return, win_y_return;
+      unsigned int mask_return;
+      bool overrideMouse = XQueryPointer(infoDisplay, \
+        infoWindow, \
+        &root_return, \
+        &child_return, \
+        &root_x_return, \
+        &root_y_return, \
+        &win_x_return, \
+        &win_y_return, \
+        &mask_return);
+        
+      if (overrideMouse && 2 < win_x_return && win_x_return < GAME_X-2 && 2 < win_y_return && win_y_return < GAME_Y-2 ) {
+        left_click = false;
+        right_click = false;
+        if (mask_return&0x100)
+          left_click = true;
+        if (mask_return&0x400)
+          right_click = true;
+        mouse_x = win_x_return;
+        mouse_y = win_y_return;
+      }
     }
-    
     mouse_x = std::max(1, std::min(mouse_x, GAME_X-2));
     mouse_y = std::max(1, std::min(mouse_y, GAME_Y-2));
     
@@ -353,18 +497,20 @@ int main(int argc, char **argv) {
     last_right_click = right_click;
     
     // Draw cursor stuff
-    unsigned long cursorcolor = image->red_mask;
-    if (left_click)
-      cursorcolor = image->green_mask;
-    if (right_click)
-      cursorcolor = image->blue_mask;
-    for (int x = -1; x < 2; x++)
-      for (int y = -1; y < 2; y++)
-        XPutPixel(image, x+mouse_x, y+mouse_y, cursorcolor);
-    
-    // copy image to info display
-    XPutImage(infoDisplay, infoWindow, DefaultGC(infoDisplay, s), image, 0, 0, 0, 0, GAME_X, GAME_Y);
-    XDestroyImage(image);
+    if (graphics) {
+      unsigned long cursorcolor = image->red_mask;
+      if (left_click)
+        cursorcolor = image->green_mask;
+      if (right_click)
+        cursorcolor = image->blue_mask;
+      for (int x = -1; x < 2; x++)
+        for (int y = -1; y < 2; y++)
+          XPutPixel(image, x+mouse_x, y+mouse_y, cursorcolor);
+      
+      // copy image to info display
+      XPutImage(infoDisplay, infoWindow, DefaultGC(infoDisplay, s), image, 0, 0, 0, 0, GAME_X, GAME_Y);
+      XDestroyImage(image);
+    }
 
     float looptime = float_t(clock() - startloop)/CLOCKS_PER_SEC;
     if(looptime < 0.1)
